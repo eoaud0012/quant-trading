@@ -78,3 +78,12 @@ def calculate_bollinger_bands(series: pd.Series, window: int = 20, num_std: floa
         'upper': sma + (std * num_std),
         'lower': sma - (std * num_std)
     }) 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 호환성을 위한 함수 별칭들
+# ─────────────────────────────────────────────────────────────────────────────
+
+# auto_trader.py에서 사용하는 함수명들에 대한 별칭
+calculate_rsi = compute_rsi
+simple_moving_average = calculate_moving_average 

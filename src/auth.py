@@ -1,20 +1,43 @@
 """
 키움증권 REST API 인증 관리
-- Access Token 발급
-- 자동 갱신
+- Access Token 발급 및 자동 갱신
+- Bearer 헤더 생성
 """
 
 import requests
 import threading
-import datetime
 import time
+from datetime import datetime, timedelta
 from typing import Optional
-from .config import APP_KEY, SECRET_KEY, TOKEN_URL
+
+from config import APP_KEY, SECRET_KEY, TOKEN_URL
 
 # 전역 변수: 토큰 정보
 access_token: str = ""
-token_expiry: Optional[datetime.datetime] = None
+token_expiry: Optional[datetime] = None
 LOCK = threading.Lock()
+
+
+def parse_kiwoom_datetime(dt_str: str) -> datetime:
+    """
+    키움증권 API의 날짜 형식을 파싱
+    형식: "20250601230412" -> YYYYMMDDHHMMSS
+    """
+    try:
+        # ISO 형식 시도
+        return datetime.fromisoformat(dt_str)
+    except ValueError:
+        # 키움 형식 파싱: YYYYMMDDHHMMSS
+        if len(dt_str) == 14:
+            year = int(dt_str[:4])
+            month = int(dt_str[4:6])
+            day = int(dt_str[6:8])
+            hour = int(dt_str[8:10])
+            minute = int(dt_str[10:12])
+            second = int(dt_str[12:14])
+            return datetime(year, month, day, hour, minute, second)
+        else:
+            raise ValueError(f"Unsupported datetime format: {dt_str}")
 
 
 def fetch_access_token() -> None:
@@ -34,18 +57,34 @@ def fetch_access_token() -> None:
     }
     
     try:
+        print(f"[API 요청] URL: {TOKEN_URL}")
+        print(f"[API 요청] Body: {body}")
+        
         resp = requests.post(TOKEN_URL, headers=headers, json=body)
+        print(f"[API 응답] Status: {resp.status_code}")
+        print(f"[API 응답] Headers: {dict(resp.headers)}")
+        print(f"[API 응답] Body: {resp.text}")
+        
         if resp.status_code != 200:
             raise RuntimeError(f"[토큰발급 실패] status_code={resp.status_code}, body={resp.text}")
 
         data = resp.json()
-        # 응답 예: {"token_type":"Bearer","token":"eyJ....","expires_dt":"2025-06-10T12:34:56"}
+        
+        # 공식 문서에 따른 return_code 체크
+        return_code = data.get("return_code", -1)
+        return_msg = data.get("return_msg", "")
+        
+        if return_code != 0:
+            raise RuntimeError(f"[토큰발급 실패] return_code={return_code}, return_msg={return_msg}")
+        
+        # 응답 예: {"expires_dt":"20250601230412","token_type":"bearer","token":"...","return_code":0,"return_msg":"정상적으로 처리되었습니다"}
         with LOCK:
             access_token = data.get("token")
-            # expires_dt는 ISO 8601 형식(예: "2025-06-10T12:34:56")으로 옴
             expires_str = data.get("expires_dt")
-            # datetime.fromisoformat은 "YYYY-MM-DDTHH:MM:SS" 형식을 파싱
-            token_expiry = datetime.datetime.fromisoformat(expires_str)
+            print(f"[디버그] expires_str: {expires_str}")
+            print(f"[API 성공] {return_msg}")
+            # 키움증권 날짜 형식 파싱
+            token_expiry = parse_kiwoom_datetime(expires_str)
 
         print(f"[토큰발급 성공] Access Token 갱신 완료, 만료 시각: {token_expiry.isoformat()}")
         
@@ -63,7 +102,7 @@ def token_auto_refresher():
             with LOCK:
                 if token_expiry:
                     # 만료 60초 전부터 갱신 시도
-                    now = datetime.datetime.now()
+                    now = datetime.now()
                     # KST 시간으로 가정 (필요시 timezone 조정 필요)
                     time_to_expiry = (token_expiry - now).total_seconds()
                 else:
@@ -123,3 +162,12 @@ def initialize_auth():
     # 토큰 갱신용 백그라운드 스레드 시작 (daemon=True로 설정하여 메인 종료 시 자동 종료)
     threading.Thread(target=token_auto_refresher, daemon=True).start()
     print("[인증 초기화 완료] 토큰 자동 갱신 스레드 시작") 
+
+
+def get_access_token() -> str:
+    """
+    현재 저장된 Access Token을 반환
+    WebSocket 등에서 토큰이 필요할 때 사용
+    """
+    with LOCK:
+        return access_token 

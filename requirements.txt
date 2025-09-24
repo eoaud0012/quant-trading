@@ -1,17 +1,20 @@
 # Core dependencies
-numpy==1.24.3
-pandas==2.0.3
-requests==2.31.0
+numpy>=1.24.0
+pandas>=2.0.0
+requests>=2.31.0
 websocket-client==1.6.1
 python-dotenv==1.0.0
 
 # GUI
-PyQt5==5.15.9
+PyQt5>=5.15.0
 
 # Data visualization (optional)
 matplotlib==3.7.2
-pyqtgraph==0.13.3
+pyqtgraph>=0.13.0
 
 # Development tools
 black==23.7.0
-pylint==2.17.4 
+pylint==2.17.4
+
+# Added from the code block
+websockets>=11.0.0 

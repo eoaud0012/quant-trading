@@ -1,32 +1,33 @@
 """
-자동매매 엔진
-- RSI 기반 매수/매도 전략
-- 실시간 가격 모니터링
-- 포지션 관리
+RSI 기반 자동매매 엔진
+- 매매 신호 생성 및 자동 주문 실행
+- 실시간 웹소켓 데이터와 연동
 """
 
-import threading
-import datetime
 import time
-from typing import List, Dict
+import threading
+from typing import List, Dict, Any
+from datetime import datetime
 from PyQt5.QtCore import QObject, pyqtSignal
 
-from .config import (
+from api import (
+    place_market_order_rest, 
+    get_daily_candles_rest, 
+    get_10min_candles_rest,
+    get_orderbook_rest,
+    place_limit_order_rest,
+    get_holdings_rest
+)
+from indicators import calculate_rsi as compute_rsi, simple_moving_average, check_daily_uptrend
+from websocket_streamer import KiwoomWebSocketStreamer as RealTimeStreamer
+from config import (
+    DEFAULT_SYMBOLS,
     OVERSOLD_RSI_THRESHOLD, 
     TARGET_PROFIT_FIRST, 
     TARGET_PROFIT_SECOND,
     MAX_ORDERBOOK_LEVELS,
     TR_SLEEP_SHORT
 )
-from .api import (
-    get_daily_candles_rest,
-    get_10min_candles_rest,
-    get_orderbook_rest,
-    place_limit_order_rest,
-    place_market_order_rest
-)
-from .indicators import compute_rsi, check_daily_uptrend
-from .websocket_streamer import RealTimeStreamer
 
 
 class AutoTrader(QObject):
@@ -71,10 +72,15 @@ class AutoTrader(QObject):
             return
             
         self.is_running = True
-        self.rts.start()
+        try:
+            self.rts.start()
+            self.sig_signal_msg.emit("[WebSocket] 실시간 데이터 연결 시도 중...")
+        except Exception as e:
+            self.sig_signal_msg.emit(f"[WebSocket 오류] {str(e)} - 실시간 데이터 없이 계속 진행")
+        
         self.strategy_thread = threading.Thread(target=self.run_strategy, daemon=True)
         self.strategy_thread.start()
-        self.sig_signal_msg.emit("[자동매매] 시작되었습니다.")
+        self.sig_signal_msg.emit("[자동매매] 시작되었습니다. (실시간 데이터는 연결 시 활성화)")
 
     def stop(self):
         """자동매매 중지"""
@@ -83,39 +89,46 @@ class AutoTrader(QObject):
             return
             
         self.is_running = False
-        self.rts.stop()
+        try:
+            self.rts.stop()
+        except Exception as e:
+            self.sig_signal_msg.emit(f"[WebSocket 중지 오류] {str(e)}")
         self.sig_signal_msg.emit("[자동매매] 중지되었습니다.")
 
     def run_strategy(self):
         """전략 실행 루프"""
         while self.is_running:
             try:
-                now = datetime.datetime.now()
+                now = datetime.now()
                 if ((now.hour > 9) or (now.hour == 9 and now.minute >= 0)) and \
                    ((now.hour < 15) or (now.hour == 15 and now.minute < 25)):
                     
                     for sym in self.symbols:
                         if not self.is_running:
                             break
-                            
-                        df_daily = get_daily_candles_rest(sym, count=30)
-                        if df_daily.empty or not check_daily_uptrend(df_daily):
-                            continue
-
-                        df_10m = get_10min_candles_rest(sym, count=50)
-                        if df_10m.empty or len(df_10m) < 14:
-                            continue
                         
-                        df_10m['RSI'] = compute_rsi(df_10m['종가'], period=14)
-                        latest_rsi = df_10m['RSI'].iloc[-1]
+                        try:
+                            df_daily = get_daily_candles_rest(sym, count=30)
+                            if df_daily.empty or not check_daily_uptrend(df_daily):
+                                continue
 
-                        if latest_rsi <= self.oversold_threshold:
-                            self.trigger_buy(sym)
-                            time.sleep(TR_SLEEP_SHORT)
+                            df_10m = get_10min_candles_rest(sym, count=50)
+                            if df_10m.empty or len(df_10m) < 14:
+                                continue
+                            
+                            df_10m['RSI'] = compute_rsi(df_10m['종가'], period=14)
+                            latest_rsi = df_10m['RSI'].iloc[-1]
 
+                            if latest_rsi <= self.oversold_threshold:
+                                self.trigger_buy(sym)
+                                time.sleep(TR_SLEEP_SHORT)
+
+                        except Exception as e:
+                            self.sig_signal_msg.emit(f"[{sym} 전략 오류] {str(e)}")
+                        
                         time.sleep(TR_SLEEP_SHORT)
 
-                    secs = 60 - datetime.datetime.now().second
+                    secs = 60 - datetime.now().second
                     time.sleep(secs if secs > 0 else 0.1)
                 else:
                     time.sleep(30)
@@ -126,27 +139,31 @@ class AutoTrader(QObject):
 
     def trigger_buy(self, symbol: str):
         """지정가 매수 주문"""
-        pos = self.positions.get(symbol)
-        if pos['qty'] > 0 or pos['buy_orders']:
-            return
+        try:
+            pos = self.positions.get(symbol)
+            if pos['qty'] > 0 or pos['buy_orders']:
+                return
 
-        bids, _ = get_orderbook_rest(symbol)
-        if not bids:
-            self.sig_signal_msg.emit(f"[매수 실패] {symbol} 호가 정보 없음")
-            return
-            
-        buy_order_ids = []
-        for level in range(min(MAX_ORDERBOOK_LEVELS, len(bids))):
-            price, _ = bids[level]
-            if price and price > 0:
-                res = place_limit_order_rest(symbol, "BUY", 1, price)
-                order_id = res.get("data", {}).get("order_id")
-                if order_id:
-                    buy_order_ids.append(order_id)
-                time.sleep(0.1)
+            bids, _ = get_orderbook_rest(symbol)
+            if not bids:
+                self.sig_signal_msg.emit(f"[매수 실패] {symbol} 호가 정보 없음")
+                return
+                
+            buy_order_ids = []
+            for level in range(min(MAX_ORDERBOOK_LEVELS, len(bids))):
+                price, _ = bids[level]
+                if price and price > 0:
+                    res = place_limit_order_rest(symbol, "BUY", 1, price)
+                    order_id = res.get("data", {}).get("order_id")
+                    if order_id:
+                        buy_order_ids.append(order_id)
+                    time.sleep(0.1)
 
-        pos['buy_orders'] = buy_order_ids
-        self.sig_signal_msg.emit(f"[매수 주문] {symbol} 지정가 매수 요청 완료")
+            pos['buy_orders'] = buy_order_ids
+            self.sig_signal_msg.emit(f"[매수 주문] {symbol} 지정가 매수 요청 완료")
+        
+        except Exception as e:
+            self.sig_signal_msg.emit(f"[매수 주문 오류] {symbol}: {str(e)}")
 
     def on_orderbook_update(self, symbol: str, bids: list, asks: list):
         """실시간 호가 업데이트"""
